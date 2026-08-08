@@ -1,7 +1,14 @@
 /*
  * BOM Weather Alerts
  * Namespace: Hubitat Integrations
- * Version: 1.0.1
+ * Version: 1.1.0
+ *
+ * v1.1.0: adds optional speaker announcements (capability.speechSynthesis)
+ * alongside notification devices, and a snooze - a configurable-duration
+ * button that silences both notification and speaker alerts. Snoozed
+ * warnings are still recorded as seen underneath, so nothing floods in
+ * the moment the snooze ends; the status page still updates normally
+ * while snoozed, only the alerting itself is suppressed.
  *
  * v1.0.1: sends a browser-like User-Agent header on the feed request.
  * BOM's servers return HTTP 403 to requests using Hubitat's default
@@ -63,12 +70,23 @@ def mainPage() {
         section('Filtering (optional)') {
             input 'hazardFilter', 'text', required: false,
                   title: 'Only alert when the warning title contains (comma-separated, case-insensitive)'
-            paragraph 'Leave blank to alert on every new warning. Example: Severe Weather, Flood, Fire Weather'
+            paragraph 'Leave blank to alert on every new warning. Example: Severe Weather, Flood, Fire Weather, Lower West'
         }
         section('Alerts') {
             input 'notifiers', 'capability.notification', title: 'Send alerts to', multiple: true, required: true
             input 'btnCheckNow', 'button', title: 'Check feed now'
             input 'btnTestNotify', 'button', title: 'Send test notification'
+        }
+        section('Speaker alerts (optional)') {
+            input 'speechDevices', 'capability.speechSynthesis', title: 'Speaker(s) to announce warnings',
+                  multiple: true, required: false
+            input 'btnTestSpeaker', 'button', title: 'Test speaker alert'
+        }
+        section('Snooze') {
+            paragraph 'Silences both notification and speaker alerts for a set time. Warnings that arrive while snoozed are still recorded as seen, so nothing floods in once the snooze ends - only the alert itself is held back.'
+            input 'snoozeHours', 'number', title: 'Snooze duration (hours)', defaultValue: 1, range: '1..48', required: true
+            input 'btnSnooze', 'button', title: 'Snooze alerts'
+            input 'btnUnsnooze', 'button', title: 'Cancel snooze'
         }
         section('Status') {
             paragraph statusText()
@@ -77,8 +95,14 @@ def mainPage() {
 }
 
 def statusText() {
-    if (!state.lastPollAt) return 'Not polled yet - save this page to run the first check.'
     StringBuilder sb = new StringBuilder()
+    if (isSnoozed()) {
+        sb << "<b>Alerts snoozed until: ${new Date(state.snoozedUntil).format('yyyy-MM-dd HH:mm:ss')}</b><br><br>"
+    }
+    if (!state.lastPollAt) {
+        sb << 'Not polled yet - save this page to run the first check.'
+        return sb.toString()
+    }
     sb << "Last checked: ${state.lastPollAt}<br>"
     sb << "Warnings currently in feed: ${state.lastItemCount ?: 0}<br>"
     if (state.lastError) {
@@ -97,7 +121,13 @@ def appButtonHandler(btn) {
     if (btn == 'btnCheckNow') {
         pollFeed()
     } else if (btn == 'btnTestNotify') {
-        sendAlert('Test notification from BOM Weather Alerts.')
+        sendNotification('Test notification from BOM Weather Alerts.')
+    } else if (btn == 'btnTestSpeaker') {
+        speakAlert('This is a test of the BOM Weather Alerts speaker announcement.')
+    } else if (btn == 'btnSnooze') {
+        snoozeAlerts()
+    } else if (btn == 'btnUnsnooze') {
+        state.snoozedUntil = null
     }
 }
 
@@ -159,7 +189,7 @@ def pollFeed() {
             newItems = applyHazardFilter(newItems)
 
             newItems.each { w ->
-                sendAlert("BOM Warning: ${w.title} - ${w.link}")
+                raiseAlert(w)
             }
 
             List<String> updatedGuids = (items.collect { it.guid } + seenGuids).unique()
@@ -196,10 +226,31 @@ def scheduleNextPoll() {
     runIn(minutes * 60, pollFeed)
 }
 
-def sendAlert(String msg) {
+def raiseAlert(Map warning) {
+    if (isSnoozed()) return
+    sendNotification("BOM Warning: ${warning.title} - ${warning.link}")
+    speakAlert("BOM weather warning. ${warning.title}")
+}
+
+def sendNotification(String msg) {
     if (!settings.notifiers) {
         log.warn "BOM Weather Alerts: no notification devices configured - alert not sent: ${msg}"
         return
     }
     settings.notifiers.each { it.deviceNotification(msg) }
+}
+
+def speakAlert(String msg) {
+    if (!settings.speechDevices) return
+    settings.speechDevices.each { it.speak(msg) }
+}
+
+boolean isSnoozed() {
+    return state.snoozedUntil && now() < state.snoozedUntil
+}
+
+def snoozeAlerts() {
+    Integer hours = (settings.snoozeHours ?: 1) as Integer
+    if (hours < 1) hours = 1
+    state.snoozedUntil = now() + (hours * 60 * 60 * 1000L)
 }
