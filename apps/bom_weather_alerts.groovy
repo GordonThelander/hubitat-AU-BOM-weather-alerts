@@ -1,7 +1,13 @@
 /*
  * BOM Weather Alerts
  * Namespace: Hubitat Integrations
- * Version: 1.3.0
+ * Version: 1.3.1
+ *
+ * v1.3.1: temperature recovery ("back to normal") no longer sends a
+ * notification/speaker alert - only three things ever alert: a new RSS
+ * warning, temperature rising above the high threshold, temperature
+ * falling below the low threshold. Recovery is still tracked internally
+ * (so a threshold can re-alert on a later crossing), it's just silent.
  *
  * v1.3.0: replaces the ad-hoc manual snooze with a Critical Device
  * Monitor-style quiet hours window (start/end time, not a duration
@@ -339,7 +345,6 @@ def checkTemperature(Double temp) {
             raiseAlert("Temperature alert: currently ${temp}°C, above the high threshold of ${high}°C.")
         } else if (!above && state.tempHighAlerted) {
             state.tempHighAlerted = false
-            raiseAlert("Temperature back to normal: currently ${temp}°C, below the high threshold of ${high}°C.")
         }
     }
 
@@ -351,7 +356,6 @@ def checkTemperature(Double temp) {
             raiseAlert("Temperature alert: currently ${temp}°C, below the low threshold of ${low}°C.")
         } else if (!below && state.tempLowAlerted) {
             state.tempLowAlerted = false
-            raiseAlert("Temperature back to normal: currently ${temp}°C, above the low threshold of ${low}°C.")
         }
     }
 }
