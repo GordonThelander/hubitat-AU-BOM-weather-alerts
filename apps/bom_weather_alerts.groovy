@@ -1,7 +1,14 @@
 /*
  * BOM Weather Alerts
  * Namespace: Hubitat Integrations
- * Version: 1.3.1
+ * Version: 1.4.0
+ *
+ * v1.4.0: routes alerts through Gmail Notification Gateway's Group:/
+ * Subject: prefix when the selected notifier is that specific driver
+ * (matched by typeName, not device ID) - so alerts go to a chosen
+ * recipient group (user/family/critical) rather than whatever the
+ * device's own default is. Other notifier types (e.g. Mobile Proxy)
+ * still get the plain message, unprefixed.
  *
  * v1.3.1: temperature recovery ("back to normal") no longer sends a
  * notification/speaker alert - only three things ever alert: a new RSS
@@ -101,6 +108,9 @@ def mainPage() {
         }
         section('Alerts') {
             input 'notifiers', 'capability.notification', title: 'Send alerts to', multiple: true, required: true
+            input 'gmailGroup', 'enum', title: 'Gmail recipient group (Gmail Notification Gateway devices only)',
+                  options: ['user', 'family', 'critical'], defaultValue: 'critical', required: false
+            paragraph 'Only applies to a selected notifier that is actually a Gmail Notification Gateway device - sent as its Group:/Subject: prefix. Other notifier types (e.g. Mobile Proxy) get the plain message either way.'
             input 'btnCheckNow', 'button', title: 'Check feed now'
             input 'btnTestNotify', 'button', title: 'Send test notification'
         }
@@ -171,7 +181,7 @@ def appButtonHandler(btn) {
     if (btn == 'btnCheckNow') {
         pollFeed()
     } else if (btn == 'btnTestNotify') {
-        sendNotification('Test notification from BOM Weather Alerts.')
+        sendNotification('Test notification from BOM Weather Alerts.', 'BOM Weather Alerts - Test')
     } else if (btn == 'btnTestSpeaker') {
         speakAlert('This is a test of the BOM Weather Alerts speaker announcement.')
     } else if (btn == 'btnTestTemp') {
@@ -247,7 +257,7 @@ def pollFeed() {
             newItems = applyHazardFilter(newItems)
 
             newItems.each { w ->
-                raiseAlert("BOM Warning: ${w.title} - ${w.link}", "BOM weather warning. ${w.title}")
+                raiseAlert("BOM Warning: ${w.title} - ${w.link}", "BOM weather warning. ${w.title}", 'BOM Weather Warning')
             }
 
             List<String> updatedGuids = (items.collect { it.guid } + seenGuids).unique()
@@ -284,12 +294,12 @@ def scheduleNextPoll() {
     runIn(minutes * 60, pollFeed)
 }
 
-def raiseAlert(String notifyMsg, String speakMsg = null) {
+def raiseAlert(String notifyMsg, String speakMsg = null, String subject = 'BOM Weather Alerts') {
     if (isQuietHours()) {
         recordQuietHoursEvent(notifyMsg)
         return
     }
-    sendNotification(notifyMsg)
+    sendNotification(notifyMsg, subject)
     speakAlert(speakMsg ?: notifyMsg)
 }
 
@@ -307,16 +317,16 @@ def recordQuietHoursEvent(String msg) {
 def sendQuietHoursSummary() {
     List<String> events = (state.quietHoursEvents ?: []) as List<String>
     if (events) {
-        sendNotification("BOM Weather Alerts - quiet hours summary (${events.size()} item${events.size() == 1 ? '' : 's'}): " + events.join(' | '))
+        sendNotification("BOM Weather Alerts - quiet hours summary (${events.size()} item${events.size() == 1 ? '' : 's'}): " + events.join(' | '), 'BOM Weather Alerts - Quiet Hours Summary')
         speakAlert("BOM weather alerts summary. ${events.size()} item${events.size() == 1 ? '' : 's'} occurred during quiet hours.")
     }
     state.quietHoursEvents = []
 
     if (state.tempHighAlerted) {
-        sendNotification("Temperature alert: still above the high threshold as quiet hours end (currently ${state.lastTemp}°C).")
+        sendNotification("Temperature alert: still above the high threshold as quiet hours end (currently ${state.lastTemp}°C).", 'Temperature Alert - High')
         speakAlert("Temperature alert. Still above the high threshold as quiet hours end.")
     } else if (state.tempLowAlerted) {
-        sendNotification("Temperature alert: still below the low threshold as quiet hours end (currently ${state.lastTemp}°C).")
+        sendNotification("Temperature alert: still below the low threshold as quiet hours end (currently ${state.lastTemp}°C).", 'Temperature Alert - Low')
         speakAlert("Temperature alert. Still below the low threshold as quiet hours end.")
     }
 }
@@ -342,7 +352,7 @@ def checkTemperature(Double temp) {
         boolean above = temp > high
         if (above && !state.tempHighAlerted) {
             state.tempHighAlerted = true
-            raiseAlert("Temperature alert: currently ${temp}°C, above the high threshold of ${high}°C.")
+            raiseAlert("Temperature alert: currently ${temp}°C, above the high threshold of ${high}°C.", null, 'Temperature Alert - High')
         } else if (!above && state.tempHighAlerted) {
             state.tempHighAlerted = false
         }
@@ -353,19 +363,25 @@ def checkTemperature(Double temp) {
         boolean below = temp < low
         if (below && !state.tempLowAlerted) {
             state.tempLowAlerted = true
-            raiseAlert("Temperature alert: currently ${temp}°C, below the low threshold of ${low}°C.")
+            raiseAlert("Temperature alert: currently ${temp}°C, below the low threshold of ${low}°C.", null, 'Temperature Alert - Low')
         } else if (!below && state.tempLowAlerted) {
             state.tempLowAlerted = false
         }
     }
 }
 
-def sendNotification(String msg) {
+def sendNotification(String msg, String subject = 'BOM Weather Alerts') {
     if (!settings.notifiers) {
         log.warn "BOM Weather Alerts: no notification devices configured - alert not sent: ${msg}"
         return
     }
-    settings.notifiers.each { it.deviceNotification(msg) }
+    settings.notifiers.each { dev ->
+        if (settings.gmailGroup && dev.typeName == 'Gmail Notification Gateway') {
+            dev.deviceNotification("Group: ${settings.gmailGroup},Subject: ${subject},${msg}")
+        } else {
+            dev.deviceNotification(msg)
+        }
+    }
 }
 
 def speakAlert(String msg) {
