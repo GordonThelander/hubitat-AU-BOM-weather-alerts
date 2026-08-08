@@ -1,7 +1,12 @@
 /*
  * BOM Weather Alerts
  * Namespace: Hubitat Integrations
- * Version: 1.0.0
+ * Version: 1.0.1
+ *
+ * v1.0.1: sends a browser-like User-Agent header on the feed request.
+ * BOM's servers return HTTP 403 to requests using Hubitat's default
+ * (Java-identifying) User-Agent - confirmed live against the WA land
+ * warnings feed.
  *
  * Polls the Australian Bureau of Meteorology's public RSS warning feed
  * and sends a notification the moment a new severe weather warning
@@ -118,7 +123,14 @@ def pollFeed() {
         return
     }
 
-    Map params = [uri: url, textParser: true, timeout: 15]
+    Map params = [
+        uri    : url,
+        textParser: true,
+        timeout: 15,
+        headers: [
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        ]
+    ]
 
     try {
         httpGet(params) { resp ->
