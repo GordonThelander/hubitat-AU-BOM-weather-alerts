@@ -1,7 +1,19 @@
 /*
  * BOM Weather Alerts
  * Namespace: Hubitat Integrations
- * Version: 1.1.0
+ * Version: 1.2.0
+ *
+ * v1.2.0: adds an optional temperature threshold alert (above/below,
+ * configurable both ways) against a Hubitat capability.temperatureMeasurement
+ * device - not BOM. BOM has no simple licensed feed for raw current
+ * temperature (only warnings via RSS, same licensing wall documented
+ * below), so this reads whatever temperature sensor is already on the
+ * hub - the OpenWeatherMap device, an Averaging Master external-temperature
+ * child, or any other. Event-driven (subscribes to the sensor's own
+ * temperature attribute) plus one backstop check on install/save, not
+ * polled separately. Alerts once per threshold crossing and again on
+ * recovery, same shape as the RSS alerting, and goes through the same
+ * snooze/notification/speaker paths.
  *
  * v1.1.0: adds optional speaker announcements (capability.speechSynthesis)
  * alongside notification devices, and a snooze - a configurable-duration
@@ -82,8 +94,20 @@ def mainPage() {
                   multiple: true, required: false
             input 'btnTestSpeaker', 'button', title: 'Test speaker alert'
         }
+        section('Temperature alerts (optional)') {
+            paragraph 'Not from BOM - BOM has no simple licensed feed for raw current temperature, only warnings via RSS. Uses a temperature sensor already on your hub instead, e.g. your OpenWeatherMap device or an Averaging Master external-temperature child.'
+            input 'tempSensor', 'capability.temperatureMeasurement', title: 'Temperature sensor to monitor',
+                  required: false, submitOnChange: true
+            if (settings.tempSensor) {
+                input 'tempHighThreshold', 'number', title: 'Alert when temperature rises above (°C)',
+                      defaultValue: 30, required: true
+                input 'tempLowThreshold', 'number', title: 'Alert when temperature falls below (°C)',
+                      defaultValue: 10, required: true
+                input 'btnTestTemp', 'button', title: 'Check temperature now'
+            }
+        }
         section('Snooze') {
-            paragraph 'Silences both notification and speaker alerts for a set time. Warnings that arrive while snoozed are still recorded as seen, so nothing floods in once the snooze ends - only the alert itself is held back.'
+            paragraph 'Silences all alerts (warnings and temperature) for a set time. Anything that happens while snoozed is still recorded underneath, so nothing floods in once the snooze ends - only the alert itself is held back.'
             input 'snoozeHours', 'number', title: 'Snooze duration (hours)', defaultValue: 1, range: '1..48', required: true
             input 'btnSnooze', 'button', title: 'Snooze alerts'
             input 'btnUnsnooze', 'button', title: 'Cancel snooze'
@@ -114,6 +138,14 @@ def statusText() {
             sb << "- ${w.title} <i>(${w.pubDate})</i><br>"
         }
     }
+    if (settings.tempSensor) {
+        sb << '<br><b>Temperature:</b> '
+        sb << (state.lastTemp != null ? "${state.lastTemp}°C" : 'not yet read')
+        if (state.lastTempAt) sb << " <i>(${state.lastTempAt})</i>"
+        sb << '<br>'
+        if (state.tempHighAlerted) sb << 'Above high threshold - alerting<br>'
+        if (state.tempLowAlerted) sb << 'Below low threshold - alerting<br>'
+    }
     return sb.toString()
 }
 
@@ -128,6 +160,8 @@ def appButtonHandler(btn) {
         snoozeAlerts()
     } else if (btn == 'btnUnsnooze') {
         state.snoozedUntil = null
+    } else if (btn == 'btnTestTemp') {
+        checkTemperatureNow()
     }
 }
 
@@ -137,12 +171,17 @@ def installed() {
 
 def updated() {
     unschedule()
+    unsubscribe()
     initialize()
 }
 
 def initialize() {
     unschedule()
     runIn(5, pollFeed)
+    if (settings.tempSensor) {
+        subscribe(settings.tempSensor, 'temperature', temperatureEventHandler)
+        runIn(6, checkTemperatureNow)
+    }
 }
 
 def pollFeed() {
@@ -189,7 +228,7 @@ def pollFeed() {
             newItems = applyHazardFilter(newItems)
 
             newItems.each { w ->
-                raiseAlert(w)
+                raiseAlert("BOM Warning: ${w.title} - ${w.link}", "BOM weather warning. ${w.title}")
             }
 
             List<String> updatedGuids = (items.collect { it.guid } + seenGuids).unique()
@@ -226,10 +265,51 @@ def scheduleNextPoll() {
     runIn(minutes * 60, pollFeed)
 }
 
-def raiseAlert(Map warning) {
+def raiseAlert(String notifyMsg, String speakMsg = null) {
     if (isSnoozed()) return
-    sendNotification("BOM Warning: ${warning.title} - ${warning.link}")
-    speakAlert("BOM weather warning. ${warning.title}")
+    sendNotification(notifyMsg)
+    speakAlert(speakMsg ?: notifyMsg)
+}
+
+def temperatureEventHandler(evt) {
+    checkTemperature(evt.doubleValue)
+}
+
+def checkTemperatureNow() {
+    if (!settings.tempSensor) return
+    def val = settings.tempSensor.currentValue('temperature')
+    if (val == null) return
+    checkTemperature(val as Double)
+}
+
+def checkTemperature(Double temp) {
+    if (temp == null) return
+    state.lastTemp = temp
+    state.lastTempAt = new Date().format('yyyy-MM-dd HH:mm:ss')
+
+    if (settings.tempHighThreshold != null) {
+        Double high = settings.tempHighThreshold as Double
+        boolean above = temp > high
+        if (above && !state.tempHighAlerted) {
+            state.tempHighAlerted = true
+            raiseAlert("Temperature alert: currently ${temp}°C, above the high threshold of ${high}°C.")
+        } else if (!above && state.tempHighAlerted) {
+            state.tempHighAlerted = false
+            raiseAlert("Temperature back to normal: currently ${temp}°C, below the high threshold of ${high}°C.")
+        }
+    }
+
+    if (settings.tempLowThreshold != null) {
+        Double low = settings.tempLowThreshold as Double
+        boolean below = temp < low
+        if (below && !state.tempLowAlerted) {
+            state.tempLowAlerted = true
+            raiseAlert("Temperature alert: currently ${temp}°C, below the low threshold of ${low}°C.")
+        } else if (!below && state.tempLowAlerted) {
+            state.tempLowAlerted = false
+            raiseAlert("Temperature back to normal: currently ${temp}°C, above the low threshold of ${low}°C.")
+        }
+    }
 }
 
 def sendNotification(String msg) {
