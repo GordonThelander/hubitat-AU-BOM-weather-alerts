@@ -1,7 +1,16 @@
 /*
  * BOM Weather Alerts
  * Namespace: Hubitat Integrations
- * Version: 1.2.0
+ * Version: 1.3.0
+ *
+ * v1.3.0: replaces the ad-hoc manual snooze with a Critical Device
+ * Monitor-style quiet hours window (start/end time, not a duration
+ * button). During the window every alert (warnings and temperature)
+ * stays silent but is still recorded; at the window's end a single
+ * summary notification covers whatever happened, and if a temperature
+ * threshold is still actively crossed right as the window ends, that
+ * escalates immediately with a full alert - same shape as Critical
+ * Device Monitor's internet-monitor quiet hours.
  *
  * v1.2.0: adds an optional temperature threshold alert (above/below,
  * configurable both ways) against a Hubitat capability.temperatureMeasurement
@@ -106,11 +115,14 @@ def mainPage() {
                 input 'btnTestTemp', 'button', title: 'Check temperature now'
             }
         }
-        section('Snooze') {
-            paragraph 'Silences all alerts (warnings and temperature) for a set time. Anything that happens while snoozed is still recorded underneath, so nothing floods in once the snooze ends - only the alert itself is held back.'
-            input 'snoozeHours', 'number', title: 'Snooze duration (hours)', defaultValue: 1, range: '1..48', required: true
-            input 'btnSnooze', 'button', title: 'Snooze alerts'
-            input 'btnUnsnooze', 'button', title: 'Cancel snooze'
+        section('Quiet hours (optional)') {
+            paragraph 'During this window, alerts (warnings and temperature) stay completely silent - no notification, no speaker - but are still tracked underneath. At the end of the window, if anything happened, you get one summary. If a temperature threshold is still actively crossed right as the window ends, that escalates immediately with a full alert, same as Critical Device Monitor\'s internet-monitor quiet hours.'
+            input 'enableQuietHours', 'bool', title: 'Suppress alerts during quiet hours', defaultValue: false, submitOnChange: true
+            if (settings.enableQuietHours) {
+                input 'quietHoursStart', 'time', title: 'Quiet hours start', required: true
+                input 'quietHoursEnd', 'time', title: 'Quiet hours end', required: true
+                input 'btnTestSummary', 'button', title: 'Send quiet hours summary now'
+            }
         }
         section('Status') {
             paragraph statusText()
@@ -120,8 +132,8 @@ def mainPage() {
 
 def statusText() {
     StringBuilder sb = new StringBuilder()
-    if (isSnoozed()) {
-        sb << "<b>Alerts snoozed until: ${new Date(state.snoozedUntil).format('yyyy-MM-dd HH:mm:ss')}</b><br><br>"
+    if (isQuietHours()) {
+        sb << '<b>Quiet hours active - alerts are being held for the end-of-window summary.</b><br><br>'
     }
     if (!state.lastPollAt) {
         sb << 'Not polled yet - save this page to run the first check.'
@@ -156,12 +168,10 @@ def appButtonHandler(btn) {
         sendNotification('Test notification from BOM Weather Alerts.')
     } else if (btn == 'btnTestSpeaker') {
         speakAlert('This is a test of the BOM Weather Alerts speaker announcement.')
-    } else if (btn == 'btnSnooze') {
-        snoozeAlerts()
-    } else if (btn == 'btnUnsnooze') {
-        state.snoozedUntil = null
     } else if (btn == 'btnTestTemp') {
         checkTemperatureNow()
+    } else if (btn == 'btnTestSummary') {
+        sendQuietHoursSummary()
     }
 }
 
@@ -181,6 +191,9 @@ def initialize() {
     if (settings.tempSensor) {
         subscribe(settings.tempSensor, 'temperature', temperatureEventHandler)
         runIn(6, checkTemperatureNow)
+    }
+    if (settings.enableQuietHours && settings.quietHoursEnd) {
+        schedule(settings.quietHoursEnd, sendQuietHoursSummary)
     }
 }
 
@@ -266,9 +279,40 @@ def scheduleNextPoll() {
 }
 
 def raiseAlert(String notifyMsg, String speakMsg = null) {
-    if (isSnoozed()) return
+    if (isQuietHours()) {
+        recordQuietHoursEvent(notifyMsg)
+        return
+    }
     sendNotification(notifyMsg)
     speakAlert(speakMsg ?: notifyMsg)
+}
+
+boolean isQuietHours() {
+    if (!settings.enableQuietHours || !settings.quietHoursStart || !settings.quietHoursEnd) return false
+    return timeOfDayIsBetween(timeToday(settings.quietHoursStart), timeToday(settings.quietHoursEnd), new Date(), location.timeZone)
+}
+
+def recordQuietHoursEvent(String msg) {
+    List<String> events = (state.quietHoursEvents ?: []) as List<String>
+    events << msg
+    state.quietHoursEvents = events
+}
+
+def sendQuietHoursSummary() {
+    List<String> events = (state.quietHoursEvents ?: []) as List<String>
+    if (events) {
+        sendNotification("BOM Weather Alerts - quiet hours summary (${events.size()} item${events.size() == 1 ? '' : 's'}): " + events.join(' | '))
+        speakAlert("BOM weather alerts summary. ${events.size()} item${events.size() == 1 ? '' : 's'} occurred during quiet hours.")
+    }
+    state.quietHoursEvents = []
+
+    if (state.tempHighAlerted) {
+        sendNotification("Temperature alert: still above the high threshold as quiet hours end (currently ${state.lastTemp}°C).")
+        speakAlert("Temperature alert. Still above the high threshold as quiet hours end.")
+    } else if (state.tempLowAlerted) {
+        sendNotification("Temperature alert: still below the low threshold as quiet hours end (currently ${state.lastTemp}°C).")
+        speakAlert("Temperature alert. Still below the low threshold as quiet hours end.")
+    }
 }
 
 def temperatureEventHandler(evt) {
@@ -323,14 +367,4 @@ def sendNotification(String msg) {
 def speakAlert(String msg) {
     if (!settings.speechDevices) return
     settings.speechDevices.each { it.speak(msg) }
-}
-
-boolean isSnoozed() {
-    return state.snoozedUntil && now() < state.snoozedUntil
-}
-
-def snoozeAlerts() {
-    Integer hours = (settings.snoozeHours ?: 1) as Integer
-    if (hours < 1) hours = 1
-    state.snoozedUntil = now() + (hours * 60 * 60 * 1000L)
 }
