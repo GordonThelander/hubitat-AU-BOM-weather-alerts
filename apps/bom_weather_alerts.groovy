@@ -1,7 +1,18 @@
 /*
  * BOM Weather Alerts
  * Namespace: Hubitat Integrations
- * Version: 1.4.0
+ * Version: 1.5.0
+ *
+ * v1.5.0: adds an optional daily rain forecast, folded into the quiet
+ * hours summary rather than its own schedule - fires once a day, at
+ * quiet hours end. Not from the warnings feed: uses BOM's Precis
+ * Forecast product (IDW14199, the WA regional forecast), which - like
+ * the warnings feed - is nominally an Anonymous FTP product but is also
+ * mirrored over plain HTTPS at the same www.bom.gov.au/fwo/ path, no FTP
+ * client needed. Same general BOM copyright basis as the warnings feed
+ * (personal/non-commercial use, no explicit prohibition like the
+ * rejected JSON API). Requires Quiet Hours (below) to be enabled, since
+ * that's what drives the once-daily schedule this hooks into.
  *
  * v1.4.0: routes alerts through Gmail Notification Gateway's Group:/
  * Subject: prefix when the selected notifier is that specific driver
@@ -131,6 +142,16 @@ def mainPage() {
                 input 'btnTestTemp', 'button', title: 'Check temperature now'
             }
         }
+        section('Rain forecast (optional)') {
+            paragraph 'Fires once a day, folded into the quiet hours summary below - requires Quiet Hours to be enabled and an end time set, since that\'s what drives the daily schedule. Not from the warnings feed: uses BOM\'s Precis Forecast product, also reachable over plain HTTPS like the warnings feed, same general personal-use licensing basis.'
+            input 'enableRainForecast', 'bool', title: 'Include today\'s rain forecast in the daily quiet hours summary',
+                  defaultValue: false, submitOnChange: true
+            if (settings.enableRainForecast) {
+                input 'rainLocation', 'text', title: 'BOM forecast location name', defaultValue: 'Yanchep', required: true
+                paragraph 'Case-sensitive match against BOM\'s Precis Forecast area names (e.g. Yanchep, Perth, Lancelin) - Yanchep is the nearest named location to Two Rocks, and matches the city your OpenWeatherMap device already reports.'
+                input 'btnTestRain', 'button', title: 'Check rain forecast now'
+            }
+        }
         section('Quiet hours (optional)') {
             paragraph 'During this window, alerts (warnings and temperature) stay completely silent - no notification, no speaker - but are still tracked underneath. At the end of the window, if anything happened, you get one summary. If a temperature threshold is still actively crossed right as the window ends, that escalates immediately with a full alert, same as Critical Device Monitor\'s internet-monitor quiet hours.'
             input 'enableQuietHours', 'bool', title: 'Suppress alerts during quiet hours', defaultValue: false, submitOnChange: true
@@ -174,6 +195,18 @@ def statusText() {
         if (state.tempHighAlerted) sb << 'Above high threshold - alerting<br>'
         if (state.tempLowAlerted) sb << 'Below low threshold - alerting<br>'
     }
+    if (settings.enableRainForecast) {
+        sb << '<br><b>Rain forecast:</b> '
+        if (state.rainError) {
+            sb << "error - ${state.rainError}"
+        } else if (rainSummaryText()) {
+            sb << rainSummaryText()
+            if (state.rainCheckedAt) sb << " <i>(${state.rainCheckedAt})</i>"
+        } else {
+            sb << 'not yet checked'
+        }
+        sb << '<br>'
+    }
     return sb.toString()
 }
 
@@ -188,6 +221,8 @@ def appButtonHandler(btn) {
         checkTemperatureNow()
     } else if (btn == 'btnTestSummary') {
         sendQuietHoursSummary()
+    } else if (btn == 'btnTestRain') {
+        fetchRainForecast()
     }
 }
 
@@ -315,10 +350,26 @@ def recordQuietHoursEvent(String msg) {
 }
 
 def sendQuietHoursSummary() {
+    if (settings.enableRainForecast) {
+        fetchRainForecast()
+    }
+
     List<String> events = (state.quietHoursEvents ?: []) as List<String>
-    if (events) {
-        sendNotification("BOM Weather Alerts - quiet hours summary (${events.size()} item${events.size() == 1 ? '' : 's'}): " + events.join(' | '), 'BOM Weather Alerts - Quiet Hours Summary')
-        speakAlert("BOM weather alerts summary. ${events.size()} item${events.size() == 1 ? '' : 's'} occurred during quiet hours.")
+    String rain = settings.enableRainForecast ? rainSummaryText() : null
+
+    if (events || rain) {
+        StringBuilder notify = new StringBuilder("BOM Weather Alerts - quiet hours summary")
+        StringBuilder speak = new StringBuilder('BOM weather alerts summary.')
+        if (events) {
+            notify << " (${events.size()} item${events.size() == 1 ? '' : 's'}): " + events.join(' | ')
+            speak << " ${events.size()} item${events.size() == 1 ? '' : 's'} occurred during quiet hours."
+        }
+        if (rain) {
+            notify << (events ? ' | ' : ': ') << rain
+            speak << " ${rain}"
+        }
+        sendNotification(notify.toString(), 'BOM Weather Alerts - Quiet Hours Summary')
+        speakAlert(speak.toString())
     }
     state.quietHoursEvents = []
 
@@ -368,6 +419,62 @@ def checkTemperature(Double temp) {
             state.tempLowAlerted = false
         }
     }
+}
+
+def fetchRainForecast() {
+    String location = settings.rainLocation
+    if (!location) return
+
+    Map params = [
+        uri    : 'https://www.bom.gov.au/fwo/IDW14199.xml',
+        textParser: true,
+        timeout: 20,
+        headers: [
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        ]
+    ]
+
+    try {
+        httpGet(params) { resp ->
+            if (resp.status != 200) {
+                state.rainError = "Forecast product returned HTTP ${resp.status}"
+                return
+            }
+
+            def data = resp.data
+            String body = (data instanceof String) ? data : (data?.text ?: data?.toString())
+            def xml = new XmlSlurper().parseText(body)
+
+            def area = xml.forecast.area.find { it.@description.text() == location && it.@type.text() == 'location' }
+            if (!area) {
+                state.rainError = "No forecast area named '${location}' found."
+                return
+            }
+
+            def today = area.'forecast-period'[0]
+            String precis = today.text.find { it.@type.text() == 'precis' }?.text() ?: ''
+            String pop = today.text.find { it.@type.text() == 'probability_of_precipitation' }?.text() ?: ''
+            String range = today.element.find { it.@type.text() == 'precipitation_range' }?.text() ?: ''
+
+            state.rainPrecis = precis
+            state.rainProbability = pop
+            state.rainRange = range
+            state.rainCheckedAt = new Date().format('yyyy-MM-dd HH:mm:ss')
+            state.rainError = null
+        }
+    } catch (Exception e) {
+        state.rainError = e.message
+        log.warn "BOM Weather Alerts: rain forecast check failed - ${e.message}"
+    }
+}
+
+String rainSummaryText() {
+    if (!state.rainPrecis && !state.rainProbability) return null
+    StringBuilder sb = new StringBuilder("Today's forecast for ${settings.rainLocation}: ")
+    if (state.rainPrecis) sb << state.rainPrecis
+    if (state.rainProbability) sb << " ${state.rainProbability} chance of rain."
+    if (state.rainRange) sb << " Possible rainfall ${state.rainRange}."
+    return sb.toString().trim()
 }
 
 def sendNotification(String msg, String subject = 'BOM Weather Alerts') {
