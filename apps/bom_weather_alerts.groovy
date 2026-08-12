@@ -1,7 +1,19 @@
 /*
  * BOM Weather Alerts
  * Namespace: Hubitat Integrations
- * Version: 1.5.1
+ * Version: 1.5.2
+ *
+ * v1.5.2: fixes a likely duplicate-alert race confirmed live - the
+ * quiet hours summary listed the same temperature alert twice with an
+ * identical reading. `tempHighAlerted`/`tempLowAlerted` are written from
+ * an event handler (the sensor's own temperature attribute), where two
+ * readings arriving close together could each read the flag before
+ * either had written it back, both deciding "not yet alerted" and both
+ * firing - matching the identical race Critical Device Monitor already
+ * hit and fixed (v1.6.2) for its own event-driven safety flags. Fixed
+ * the same way: switched both flags from `state` to `atomicState`, which
+ * reads/writes storage directly on every access instead of a per-
+ * execution cached copy.
  *
  * v1.5.1: fixes a real bug confirmed live - quiet hours failed to hold
  * back a temperature alert at 23:04 inside a 21:30-06:00 window, letting
@@ -200,8 +212,8 @@ def statusText() {
         sb << (state.lastTemp != null ? "${state.lastTemp}°C" : 'not yet read')
         if (state.lastTempAt) sb << " <i>(${state.lastTempAt})</i>"
         sb << '<br>'
-        if (state.tempHighAlerted) sb << 'Above high threshold - alerting<br>'
-        if (state.tempLowAlerted) sb << 'Below low threshold - alerting<br>'
+        if (atomicState.tempHighAlerted) sb << 'Above high threshold - alerting<br>'
+        if (atomicState.tempLowAlerted) sb << 'Below low threshold - alerting<br>'
     }
     if (settings.enableRainForecast) {
         sb << '<br><b>Rain forecast:</b> '
@@ -413,10 +425,10 @@ def sendQuietHoursSummary() {
     }
     state.quietHoursEvents = []
 
-    if (state.tempHighAlerted) {
+    if (atomicState.tempHighAlerted) {
         sendNotification("Temperature alert: still above the high threshold as quiet hours end (currently ${state.lastTemp}°C).", 'Temperature Alert - High')
         speakAlert("Temperature alert. Still above the high threshold as quiet hours end.")
-    } else if (state.tempLowAlerted) {
+    } else if (atomicState.tempLowAlerted) {
         sendNotification("Temperature alert: still below the low threshold as quiet hours end (currently ${state.lastTemp}°C).", 'Temperature Alert - Low')
         speakAlert("Temperature alert. Still below the low threshold as quiet hours end.")
     }
@@ -441,22 +453,22 @@ def checkTemperature(Double temp) {
     if (settings.tempHighThreshold != null) {
         Double high = settings.tempHighThreshold as Double
         boolean above = temp > high
-        if (above && !state.tempHighAlerted) {
-            state.tempHighAlerted = true
+        if (above && !atomicState.tempHighAlerted) {
+            atomicState.tempHighAlerted = true
             raiseAlert("Temperature alert: currently ${temp}°C, above the high threshold of ${high}°C.", null, 'Temperature Alert - High')
-        } else if (!above && state.tempHighAlerted) {
-            state.tempHighAlerted = false
+        } else if (!above && atomicState.tempHighAlerted) {
+            atomicState.tempHighAlerted = false
         }
     }
 
     if (settings.tempLowThreshold != null) {
         Double low = settings.tempLowThreshold as Double
         boolean below = temp < low
-        if (below && !state.tempLowAlerted) {
-            state.tempLowAlerted = true
+        if (below && !atomicState.tempLowAlerted) {
+            atomicState.tempLowAlerted = true
             raiseAlert("Temperature alert: currently ${temp}°C, below the low threshold of ${low}°C.", null, 'Temperature Alert - Low')
-        } else if (!below && state.tempLowAlerted) {
-            state.tempLowAlerted = false
+        } else if (!below && atomicState.tempLowAlerted) {
+            atomicState.tempLowAlerted = false
         }
     }
 }
