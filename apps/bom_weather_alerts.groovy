@@ -1,7 +1,15 @@
 /*
  * BOM Weather Alerts
  * Namespace: Hubitat Integrations
- * Version: 1.5.0
+ * Version: 1.5.1
+ *
+ * v1.5.1: fixes a real bug confirmed live - quiet hours failed to hold
+ * back a temperature alert at 23:04 inside a 21:30-06:00 window, letting
+ * it through immediately instead of silencing it. Root cause was
+ * Hubitat's timeOfDayIsBetween() not handling an overnight (start-time-
+ * after-end-time) window correctly. Replaced with explicit minute-of-day
+ * comparison, matching the same fix already proven live in Critical
+ * Device Monitor.
  *
  * v1.5.0: adds an optional daily rain forecast, folded into the quiet
  * hours summary rather than its own schedule - fires once a day, at
@@ -338,9 +346,41 @@ def raiseAlert(String notifyMsg, String speakMsg = null, String subject = 'BOM W
     speakAlert(speakMsg ?: notifyMsg)
 }
 
+// Fails open (treats as NOT quiet hours) on any error, so a bad time
+// value can never accidentally suppress a real alert.
+//
+// Deliberately NOT using Hubitat's timeOfDayIsBetween() here - confirmed
+// live (2026-08-09) that an overnight window (21:30-06:00) let a
+// temperature alert through at 23:04 instead of holding it, matching a
+// bug already found and fixed the same way in Critical Device Monitor.
+// This reduces start/end/now to minutes-since-midnight in the hub's own
+// timezone and compares them directly, so the overnight-wrap case is
+// explicit, auditable logic rather than depending on unverified platform
+// behavior.
 boolean isQuietHours() {
     if (!settings.enableQuietHours || !settings.quietHoursStart || !settings.quietHoursEnd) return false
-    return timeOfDayIsBetween(timeToday(settings.quietHoursStart), timeToday(settings.quietHoursEnd), new Date(), location.timeZone)
+    try {
+        def tz = location.timeZone
+        def startCal = Calendar.getInstance(tz)
+        startCal.setTime(toDateTime(settings.quietHoursStart))
+        def endCal = Calendar.getInstance(tz)
+        endCal.setTime(toDateTime(settings.quietHoursEnd))
+        def nowCal = Calendar.getInstance(tz)
+        nowCal.setTime(new Date())
+
+        def startMin = startCal.get(Calendar.HOUR_OF_DAY) * 60 + startCal.get(Calendar.MINUTE)
+        def endMin   = endCal.get(Calendar.HOUR_OF_DAY) * 60 + endCal.get(Calendar.MINUTE)
+        def nowMin   = nowCal.get(Calendar.HOUR_OF_DAY) * 60 + nowCal.get(Calendar.MINUTE)
+
+        if (startMin == endMin) return false
+        if (startMin < endMin) {
+            return nowMin >= startMin && nowMin < endMin
+        }
+        return nowMin >= startMin || nowMin < endMin
+    } catch (e) {
+        log.warn "BOM Weather Alerts: could not evaluate quiet hours, treating as not-quiet: ${e.message}"
+        return false
+    }
 }
 
 def recordQuietHoursEvent(String msg) {
