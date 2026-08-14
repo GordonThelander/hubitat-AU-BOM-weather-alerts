@@ -1,7 +1,13 @@
 /*
  * BOM Weather Alerts
  * Namespace: Hubitat Integrations
- * Version: 1.5.2
+ * Version: 1.5.3
+ *
+ * v1.5.3: quiet hours end now sends exactly one notification/speaker
+ * alert instead of up to two - the still-alerted temperature escalation
+ * is folded into the same summary message as its own list item, rather
+ * than a separate `sendNotification()` call with its own subject.
+ * Gordon was getting two separate emails every morning at 06:00.
  *
  * v1.5.2: fixes a likely duplicate-alert race confirmed live - the
  * quiet hours summary listed the same temperature alert twice with an
@@ -406,32 +412,24 @@ def sendQuietHoursSummary() {
         fetchRainForecast()
     }
 
-    List<String> events = (state.quietHoursEvents ?: []) as List<String>
-    String rain = settings.enableRainForecast ? rainSummaryText() : null
-
-    if (events || rain) {
-        StringBuilder notify = new StringBuilder("BOM Weather Alerts - quiet hours summary")
-        StringBuilder speak = new StringBuilder('BOM weather alerts summary.')
-        if (events) {
-            notify << " (${events.size()} item${events.size() == 1 ? '' : 's'}): " + events.join(' | ')
-            speak << " ${events.size()} item${events.size() == 1 ? '' : 's'} occurred during quiet hours."
-        }
-        if (rain) {
-            notify << (events ? ' | ' : ': ') << rain
-            speak << " ${rain}"
-        }
-        sendNotification(notify.toString(), 'BOM Weather Alerts - Quiet Hours Summary')
-        speakAlert(speak.toString())
-    }
+    List<String> parts = (state.quietHoursEvents ?: []) as List<String>
     state.quietHoursEvents = []
 
+    String rain = settings.enableRainForecast ? rainSummaryText() : null
+    if (rain) parts << rain
+
     if (atomicState.tempHighAlerted) {
-        sendNotification("Temperature alert: still above the high threshold as quiet hours end (currently ${state.lastTemp}°C).", 'Temperature Alert - High')
-        speakAlert("Temperature alert. Still above the high threshold as quiet hours end.")
+        parts << "Temperature alert: still above the high threshold as quiet hours end (currently ${state.lastTemp}°C)."
     } else if (atomicState.tempLowAlerted) {
-        sendNotification("Temperature alert: still below the low threshold as quiet hours end (currently ${state.lastTemp}°C).", 'Temperature Alert - Low')
-        speakAlert("Temperature alert. Still below the low threshold as quiet hours end.")
+        parts << "Temperature alert: still below the low threshold as quiet hours end (currently ${state.lastTemp}°C)."
     }
+
+    if (!parts) return
+
+    String notify = "BOM Weather Alerts - quiet hours summary (${parts.size()} item${parts.size() == 1 ? '' : 's'}): " + parts.join(' | ')
+    String speak = "BOM weather alerts summary. ${parts.size()} item${parts.size() == 1 ? '' : 's'} from quiet hours."
+    sendNotification(notify, 'BOM Weather Alerts - Quiet Hours Summary')
+    speakAlert(speak)
 }
 
 def temperatureEventHandler(evt) {
