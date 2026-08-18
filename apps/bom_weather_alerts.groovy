@@ -1,7 +1,16 @@
 /*
  * BOM Weather Alerts
  * Namespace: Hubitat Integrations
- * Version: 1.5.3
+ * Version: 1.5.4
+ *
+ * v1.5.4: the quiet-hours-end speaker announcement said "N items from
+ * quiet hours" instead of the actual alert content - the email had the
+ * real text, the speaker didn't. Fixed by tracking notify and speak text
+ * separately through quiet-hours accumulation (a warning's notify text
+ * includes its BOM link, unsuitable to read aloud - that's what the
+ * separate speak text was always for elsewhere in this app, quiet hours
+ * just never preserved it). Speaker now says "Daily BOM Alert: " followed
+ * by the real content of everything that happened.
  *
  * v1.5.3: quiet hours end now sends exactly one notification/speaker
  * alert instead of up to two - the still-alerted temperature escalation
@@ -357,7 +366,7 @@ def scheduleNextPoll() {
 
 def raiseAlert(String notifyMsg, String speakMsg = null, String subject = 'BOM Weather Alerts') {
     if (isQuietHours()) {
-        recordQuietHoursEvent(notifyMsg)
+        recordQuietHoursEvent(notifyMsg, speakMsg ?: notifyMsg)
         return
     }
     sendNotification(notifyMsg, subject)
@@ -401,10 +410,14 @@ boolean isQuietHours() {
     }
 }
 
-def recordQuietHoursEvent(String msg) {
-    List<String> events = (state.quietHoursEvents ?: []) as List<String>
-    events << msg
-    state.quietHoursEvents = events
+def recordQuietHoursEvent(String notifyMsg, String speakMsg) {
+    List<String> notifyEvents = (state.quietHoursNotifyEvents ?: []) as List<String>
+    notifyEvents << notifyMsg
+    state.quietHoursNotifyEvents = notifyEvents
+
+    List<String> speakEvents = (state.quietHoursSpeakEvents ?: []) as List<String>
+    speakEvents << speakMsg
+    state.quietHoursSpeakEvents = speakEvents
 }
 
 def sendQuietHoursSummary() {
@@ -412,22 +425,31 @@ def sendQuietHoursSummary() {
         fetchRainForecast()
     }
 
-    List<String> parts = (state.quietHoursEvents ?: []) as List<String>
-    state.quietHoursEvents = []
+    List<String> notifyParts = (state.quietHoursNotifyEvents ?: []) as List<String>
+    List<String> speakParts = (state.quietHoursSpeakEvents ?: []) as List<String>
+    state.quietHoursNotifyEvents = []
+    state.quietHoursSpeakEvents = []
 
     String rain = settings.enableRainForecast ? rainSummaryText() : null
-    if (rain) parts << rain
-
-    if (atomicState.tempHighAlerted) {
-        parts << "Temperature alert: still above the high threshold as quiet hours end (currently ${state.lastTemp}°C)."
-    } else if (atomicState.tempLowAlerted) {
-        parts << "Temperature alert: still below the low threshold as quiet hours end (currently ${state.lastTemp}°C)."
+    if (rain) {
+        notifyParts << rain
+        speakParts << rain
     }
 
-    if (!parts) return
+    if (atomicState.tempHighAlerted) {
+        String msg = "Temperature alert: still above the high threshold as quiet hours end (currently ${state.lastTemp}°C)."
+        notifyParts << msg
+        speakParts << msg
+    } else if (atomicState.tempLowAlerted) {
+        String msg = "Temperature alert: still below the low threshold as quiet hours end (currently ${state.lastTemp}°C)."
+        notifyParts << msg
+        speakParts << msg
+    }
 
-    String notify = "BOM Weather Alerts - quiet hours summary (${parts.size()} item${parts.size() == 1 ? '' : 's'}): " + parts.join(' | ')
-    String speak = "BOM weather alerts summary. ${parts.size()} item${parts.size() == 1 ? '' : 's'} from quiet hours."
+    if (!notifyParts) return
+
+    String notify = "BOM Weather Alerts - quiet hours summary (${notifyParts.size()} item${notifyParts.size() == 1 ? '' : 's'}): " + notifyParts.join(' | ')
+    String speak = "Daily BOM Alert: " + speakParts.join(' ')
     sendNotification(notify, 'BOM Weather Alerts - Quiet Hours Summary')
     speakAlert(speak)
 }
